@@ -65,7 +65,6 @@ export default function HomePage() {
   const fetchRequests = async (userId: string) => {
     setLoading(true);
 
-    // 진행중 주문
     const { data: active } = await supabase
       .from('dispatch_requests')
       .select('*')
@@ -73,7 +72,6 @@ export default function HomePage() {
       .in('status', ['requested', 'dispatched', 'in_progress'])
       .order('created_at', { ascending: false });
 
-    // 완료 주문
     const { data: completed } = await supabase
       .from('dispatch_requests')
       .select('*')
@@ -177,9 +175,10 @@ export default function HomePage() {
           </div>
         ) : (
           (tab === 'active' ? activeRequests : completedRequests).map((req) => (
-            <div
+            <button
               key={req.id}
-              className="bg-white rounded-xl border p-4"
+              onClick={() => router.push(`/order/${req.id}`)}
+              className="w-full bg-white rounded-xl border p-4 text-left hover:shadow-md transition-shadow"
             >
               {/* 상태 + 날짜 */}
               <div className="flex justify-between items-center mb-2">
@@ -212,7 +211,7 @@ export default function HomePage() {
                   {req.payment_amount?.toLocaleString()}원
                 </span>
               </div>
-            </div>
+            </button>
           ))
         )}
       </div>
