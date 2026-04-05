@@ -9,7 +9,7 @@ export default function TimePage() {
   const [selectedTime, setSelectedTime] = useState('');
 
   // 오늘부터 7일간 날짜 생성
-  const dates = [];
+  const dates: { value: string; label: string; day: string; full: string }[] = [];
   for (let i = 0; i < 7; i++) {
     const date = new Date();
     date.setDate(date.getDate() + i);
