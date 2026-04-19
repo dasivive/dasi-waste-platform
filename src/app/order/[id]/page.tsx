@@ -67,6 +67,27 @@ function PhoneLink({ phone }: { phone: string }) {
   );
 }
 
+// 두 좌표 사이 거리(미터) 계산. null이 들어오면 0 반환.
+function getDistanceMeters(
+  lat1: number | null,
+  lng1: number | null,
+  lat2: number | null,
+  lng2: number | null
+): number {
+  if (lat1 == null || lng1 == null || lat2 == null || lng2 == null) {
+    return 0;
+  }
+  const R = 6371e3;
+  const toRad = (deg: number) => (deg * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
 export default function OrderDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const router = useRouter();
@@ -175,34 +196,38 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
     if (!request.latitude || !request.longitude) return;
     if (!mapContainerRef.current) return;
 
+    // 이 시점에서는 latitude, longitude가 null이 아님이 보장됨
+    const siteLat = request.latitude;
+    const siteLng = request.longitude;
+    const driverLat = request.driver_latitude;
+    const driverLng = request.driver_longitude;
+
     const initMap = () => {
       if (!window.kakao || !window.kakao.maps) return;
-      if (!mapContainerRef.current || !request) return;
+      if (!mapContainerRef.current) return;
 
       window.kakao.maps.load(() => {
         const kakao = window.kakao;
 
         if (!mapInstanceRef.current) {
           const options = {
-            center: new kakao.maps.LatLng(request.latitude, request.longitude),
+            center: new kakao.maps.LatLng(siteLat, siteLng),
             level: 4,
           };
           mapInstanceRef.current = new kakao.maps.Map(mapContainerRef.current, options);
 
-          const sitePosition = new kakao.maps.LatLng(request.latitude, request.longitude);
+          const sitePosition = new kakao.maps.LatLng(siteLat, siteLng);
           siteMarkerRef.current = new kakao.maps.Marker({
             position: sitePosition,
             map: mapInstanceRef.current,
           });
         }
 
-        if (request.driver_latitude && request.driver_longitude) {
-          const driverPosition = new kakao.maps.LatLng(
-            request.driver_latitude,
-            request.driver_longitude
-          );
+        if (driverLat && driverLng) {
+          const driverPosition = new kakao.maps.LatLng(driverLat, driverLng);
 
-          const svgString = '<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48"><circle cx="24" cy="24" r="20" fill="#3B82F6" stroke="white" stroke-width="3"/><text x="24" y="31" text-anchor="middle" font-size="22">🚛</text></svg>';
+          const svgString =
+            '<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48"><circle cx="24" cy="24" r="20" fill="#3B82F6" stroke="white" stroke-width="3"/><text x="24" y="31" text-anchor="middle" font-size="22">🚛</text></svg>';
           const imageSrc = 'data:image/svg+xml;utf8,' + encodeURIComponent(svgString);
           const imageSize = new kakao.maps.Size(48, 48);
           const imageOption = { offset: new kakao.maps.Point(24, 24) };
@@ -219,16 +244,11 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
           }
 
           const bounds = new kakao.maps.LatLngBounds();
-          const sitePos = new kakao.maps.LatLng(request.latitude, request.longitude);
+          const sitePos = new kakao.maps.LatLng(siteLat, siteLng);
           bounds.extend(sitePos);
           bounds.extend(driverPosition);
 
-          const distance = getDistanceMeters(
-            request.latitude,
-            request.longitude,
-            request.driver_latitude,
-            request.driver_longitude
-          );
+          const distance = getDistanceMeters(siteLat, siteLng, driverLat, driverLng);
           if (distance > 50 && mapInstanceRef.current) {
             mapInstanceRef.current.setBounds(bounds);
           }
@@ -255,18 +275,6 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
     script.onload = initMap;
     document.head.appendChild(script);
   }, [currentDetailStatus, request]);
-
-  const getDistanceMeters = (lat1: number, lng1: number, lat2: number, lng2: number) => {
-    const R = 6371e3;
-    const toRad = (deg: number) => (deg * Math.PI) / 180;
-    const dLat = toRad(lat2 - lat1);
-    const dLng = toRad(lng2 - lng1);
-    const a =
-      Math.sin(dLat / 2) ** 2 +
-      Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    return R * c;
-  };
 
   const getSecondsSinceUpdate = (updatedAt: string | null) => {
     if (!updatedAt) return null;

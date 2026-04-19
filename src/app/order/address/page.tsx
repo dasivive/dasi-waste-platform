@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 
-// 카카오 주소 검색 타입 정의
+// 전역 타입 선언 (kakao는 any로 통일)
 declare global {
   interface Window {
     daum: {
@@ -12,23 +12,7 @@ declare global {
         onclose: () => void;
       }) => { embed: (element: HTMLElement) => void };
     };
-    kakao: {
-      maps: {
-        load: (callback: () => void) => void;
-        LatLng: new (lat: number, lng: number) => unknown;
-        Map: new (container: HTMLElement, options: unknown) => unknown;
-        Marker: new (options: unknown) => unknown;
-        services: {
-          Geocoder: new () => {
-            addressSearch: (
-              address: string,
-              callback: (result: GeocoderResult[], status: string) => void
-            ) => void;
-          };
-          Status: { OK: string };
-        };
-      };
-    };
+    kakao: any;
   }
 }
 
@@ -77,7 +61,7 @@ export default function AddressPage() {
     if (!address || !mapReady || !mapRef.current) return;
 
     const geocoder = new window.kakao.maps.services.Geocoder();
-    geocoder.addressSearch(address, (result, status) => {
+    geocoder.addressSearch(address, (result: GeocoderResult[], status: string) => {
       if (status === window.kakao.maps.services.Status.OK) {
         const lat = parseFloat(result[0].y);
         const lng = parseFloat(result[0].x);
