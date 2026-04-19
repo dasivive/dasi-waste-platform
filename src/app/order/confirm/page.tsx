@@ -10,6 +10,12 @@ interface WasteItem {
   vehicleCount: number;
 }
 
+interface PriceInfo {
+  waste_type: string;
+  vehicle_type: string;
+  price: number;
+}
+
 const wasteLabels: Record<string, string> = {
   mixed: '혼합 폐기물',
   wood: '나무',
@@ -36,33 +42,78 @@ export default function ConfirmPage() {
     longitude?: number;
   }>({});
   const [totalPrice, setTotalPrice] = useState<number>(0);
+  const [itemPrices, setItemPrices] = useState<Record<string, number>>({});
   const [loading, setLoading] = useState(false);
+  const [priceLoading, setPriceLoading] = useState(true);
 
   useEffect(() => {
     const data = JSON.parse(localStorage.getItem('orderData') || '{}');
     setOrderData(data);
 
-    // 가격은 일단 기본값 (나중에 prices 테이블에서 조회)
     if (data.items) {
-      const total = data.items.reduce((sum: number, item: WasteItem) => {
-        return sum + 600000 * item.vehicleCount;
-      }, 0);
-      setTotalPrice(total);
+      fetchPrices(data.items);
+    } else {
+      setPriceLoading(false);
     }
   }, []);
+
+  // prices 테이블에서 가격 조회
+  const fetchPrices = async (items: WasteItem[]) => {
+    setPriceLoading(true);
+
+    const { data: priceData } = await supabase
+      .from('prices')
+      .select('waste_type, vehicle_type, price');
+
+    const priceMap: Record<string, number> = {};
+    let total = 0;
+
+    for (const item of items) {
+      // 해당 폐기물+차량 조합의 가격 찾기
+      const matched = priceData?.find(
+        (p: PriceInfo) =>
+          p.waste_type === item.wasteType &&
+          p.vehicle_type === item.vehicleType
+      );
+
+      // 가격을 찾으면 사용, 없으면 0원 (미등록)
+      const unitPrice = matched ? matched.price : 0;
+      const key = `${item.wasteType}_${item.vehicleType}`;
+      priceMap[key] = unitPrice;
+      total += unitPrice * item.vehicleCount;
+    }
+
+    setItemPrices(priceMap);
+    setTotalPrice(total);
+    setPriceLoading(false);
+  };
+
+  // 항목별 단가 가져오기
+  const getItemPrice = (item: WasteItem) => {
+    const key = `${item.wasteType}_${item.vehicleType}`;
+    return itemPrices[key] || 0;
+  };
 
   const formatPrice = (amount: number) => {
     return amount.toLocaleString('ko-KR') + '원';
   };
 
   // 총 차량 대수
-  const totalVehicles = orderData.items?.reduce((sum, item) => sum + item.vehicleCount, 0) || 0;
+  const totalVehicles =
+    orderData.items?.reduce((sum, item) => sum + item.vehicleCount, 0) || 0;
 
   const handleSubmit = async () => {
+    if (totalPrice === 0) {
+      alert('가격 정보가 없습니다. 관리자에게 문의해주세요.');
+      return;
+    }
+
     setLoading(true);
 
     try {
-      const { data: { user } } = await supabase.auth.getUser();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
 
       if (!user) {
         alert('로그인이 필요합니다.');
@@ -73,6 +124,8 @@ export default function ConfirmPage() {
       // 각 폐기물 종류별로 배차 요청 생성
       const items = orderData.items || [];
       for (const item of items) {
+        const unitPrice = getItemPrice(item);
+
         const { error } = await supabase.from('dispatch_requests').insert({
           requester_id: user.id,
           site_address: orderData.address,
@@ -85,7 +138,7 @@ export default function ConfirmPage() {
           requested_time: orderData.timeLabel || orderData.time,
           status: 'requested',
           payment_status: 'pending',
-          payment_amount: 600000 * item.vehicleCount,
+          payment_amount: unitPrice * item.vehicleCount,
         });
 
         if (error) {
@@ -143,11 +196,21 @@ export default function ConfirmPage() {
                   key={idx}
                   className="flex justify-between items-center bg-gray-50 rounded-lg p-3"
                 >
-                  <span className="font-medium">
-                    {wasteLabels[item.wasteType] || item.wasteType}
-                  </span>
-                  <span className="text-gray-600">
-                    {vehicleLabels[item.vehicleType] || item.vehicleType} × {item.vehicleCount}대
+                  <div>
+                    <span className="font-medium">
+                      {wasteLabels[item.wasteType] || item.wasteType}
+                    </span>
+                    <span className="text-gray-400 text-sm ml-2">
+                      {vehicleLabels[item.vehicleType] || item.vehicleType} ×{' '}
+                      {item.vehicleCount}대
+                    </span>
+                  </div>
+                  <span className="text-amber-600 font-bold text-sm">
+                    {priceLoading
+                      ? '...'
+                      : getItemPrice(item) > 0
+                      ? formatPrice(getItemPrice(item) * item.vehicleCount)
+                      : '미등록'}
                   </span>
                 </div>
               ))}
@@ -184,9 +247,14 @@ export default function ConfirmPage() {
             <div className="flex justify-between items-center">
               <span className="text-gray-700 font-bold text-lg">예상 금액</span>
               <span className="text-amber-600 font-bold text-xl">
-                {formatPrice(totalPrice)}
+                {priceLoading ? '계산 중...' : formatPrice(totalPrice)}
               </span>
             </div>
+            {totalPrice === 0 && !priceLoading && (
+              <p className="text-xs text-red-500 mt-1">
+                ⚠️ 해당 조합의 가격이 등록되지 않았습니다. 관리자에게 문의해주세요.
+              </p>
+            )}
             <p className="text-xs text-gray-400 mt-1">
               * 최종 금액은 현장 상황에 따라 변동될 수 있습니다
             </p>
@@ -196,16 +264,17 @@ export default function ConfirmPage() {
         {/* 안내 사항 */}
         <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
           <p className="text-sm text-blue-800">
-            ℹ️ 배차 요청 후 집하장에서 기사를 배정합니다. 배정이 완료되면 알려드립니다.
+            ℹ️ 배차 요청 후 집하장에서 기사를 배정합니다. 배정이 완료되면
+            알려드립니다.
           </p>
         </div>
 
         {/* 배차 요청 버튼 */}
         <button
           onClick={handleSubmit}
-          disabled={loading}
+          disabled={loading || priceLoading || totalPrice === 0}
           className={`w-full py-4 rounded-xl text-white font-bold text-lg ${
-            loading
+            loading || priceLoading || totalPrice === 0
               ? 'bg-gray-400 cursor-not-allowed'
               : 'bg-amber-500 hover:bg-amber-600'
           }`}
