@@ -3,6 +3,7 @@
 import { useState, useEffect, use, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { supabase } from '@/lib/supabase';
+import { requestPayment } from '@/lib/portone';
 
 interface DispatchRequest {
   id: string;
@@ -17,6 +18,10 @@ interface DispatchRequest {
   status: string;
   payment_status: string;
   payment_amount: number;
+  payment_id: string | null;      // PortOne 결제 고유 ID
+  paid_at: string | null;          // 결제 완료 시각
+  platform_fee: number | null;     // 다시 수수료 (내부용, 고객엔 안 보임)
+  yard_payout: number | null;      // 집하장 지급액 (내부용, 고객엔 안 보임)
   assigned_driver_id: string | null;
   created_at: string;
   driver_latitude: number | null;
@@ -97,6 +102,7 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
   const [statusLogs, setStatusLogs] = useState<StatusLog[]>([]);
   const [currentDetailStatus, setCurrentDetailStatus] = useState('requested');
   const [loading, setLoading] = useState(true);
+  const [paying, setPaying] = useState(false); // 결제 진행 중 여부
 
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<any>(null);
@@ -190,13 +196,109 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
     };
   }, [id]);
 
+  // ==========================================================
+  // 결제 처리 함수 (Step 5 - 핵심!)
+  // ==========================================================
+  // 1. 로그인된 사용자 정보 조회
+  // 2. PortOne 결제창 호출
+  // 3. 결제 성공 시 DB 업데이트 + 기사 busy 상태 변경
+  // 4. 결제 실패 시 에러 메시지 표시
+  const handlePayment = async () => {
+    if (!request) return;
+    if (paying) return; // 중복 클릭 방지
+
+    setPaying(true);
+
+    try {
+      // 1. 현재 로그인한 고객 정보 조회 (결제창에 이름 넣기 위해)
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) {
+        alert('로그인이 필요합니다.');
+        router.push('/login');
+        return;
+      }
+
+      const { data: userData } = await supabase
+        .from('users')
+        .select('name, phone')
+        .eq('id', user.id)
+        .single();
+
+      const customerName = userData?.name || '고객';
+      const customerPhone = userData?.phone || undefined;
+
+      // 2. 주문명 생성 (결제창에 표시될 내용)
+      const orderName =
+        (wasteLabels[request.waste_type] || request.waste_type) +
+        ' ' +
+        (vehicleLabels[request.vehicle_type] || request.vehicle_type);
+
+      // 3. PortOne 결제창 호출
+      const result = await requestPayment({
+        orderId: request.id,
+        orderName: orderName,
+        amount: request.payment_amount,
+        customerName: customerName,
+        customerPhone: customerPhone,
+        customerEmail: user.email,
+      });
+
+      // 4. 결제 실패 (사용자가 취소했거나 카드 거절)
+      if (!result.success) {
+        alert('결제가 완료되지 않았습니다.\n' + (result.errorMessage || ''));
+        setPaying(false);
+        return;
+      }
+
+      // 5. 결제 성공 → DB 업데이트
+      const { error: updateError } = await supabase
+        .from('dispatch_requests')
+        .update({
+          payment_status: 'paid',
+          payment_id: result.paymentId,
+          paid_at: new Date().toISOString(),
+        })
+        .eq('id', request.id);
+
+      if (updateError) {
+        console.error('DB 업데이트 실패:', updateError);
+        alert('결제는 완료되었지만 저장에 실패했습니다. 관리자에게 문의해주세요.');
+        setPaying(false);
+        return;
+      }
+
+      // 6. 기사 상태를 busy로 변경 (이제야 배차 확정)
+      if (request.assigned_driver_id) {
+        await supabase
+          .from('drivers')
+          .update({ status: 'busy' })
+          .eq('id', request.assigned_driver_id);
+      }
+
+      // 7. 결제 로그 기록 (타임라인 추적용)
+      await supabase.from('dispatch_logs').insert({
+        request_id: request.id,
+        status: 'paid',
+        changed_by: user.id,
+      });
+
+      alert('결제가 완료되었습니다!\n기사가 곧 출발할 예정입니다.');
+
+      // Realtime이 자동으로 UI를 업데이트해줌 (별도 새로고침 불필요)
+    } catch (err) {
+      console.error('결제 처리 오류:', err);
+      alert('결제 처리 중 오류가 발생했습니다.');
+    } finally {
+      setPaying(false);
+    }
+  };
+
   useEffect(() => {
     if (!MAP_VISIBLE_STATUSES.includes(currentDetailStatus)) return;
     if (!request) return;
     if (!request.latitude || !request.longitude) return;
     if (!mapContainerRef.current) return;
 
-    // 이 시점에서는 latitude, longitude가 null이 아님이 보장됨
     const siteLat = request.latitude;
     const siteLng = request.longitude;
     const driverLat = request.driver_latitude;
@@ -345,6 +447,13 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
     secondsAgo !== null &&
     secondsAgo < 120;
 
+  // 결제 버튼을 보여줄 조건:
+  // - 배차가 확정됨 (status === 'dispatched')
+  // - 결제가 아직 안 됨 (payment_status === 'awaiting_payment')
+  const showPaymentButton =
+    request.status === 'dispatched' &&
+    request.payment_status === 'awaiting_payment';
+
   return (
     <div className="min-h-screen bg-gray-50">
       <div className="bg-white border-b px-4 py-3 flex items-center">
@@ -391,6 +500,51 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
           <div className="bg-gray-50 border border-gray-200 rounded-xl p-4 text-center">
             <p className="text-2xl mb-2">✅</p>
             <p className="text-gray-800 font-bold">작업 완료</p>
+          </div>
+        )}
+
+        {/* ========================================================== */}
+        {/* 결제하기 버튼 (Step 5 핵심) */}
+        {/* 배차 확정 + 결제 대기 상태에서만 표시 */}
+        {/* ========================================================== */}
+        {showPaymentButton && (
+          <div className="bg-amber-50 border-2 border-amber-400 rounded-xl p-5 space-y-3">
+            <div className="text-center">
+              <p className="text-2xl mb-1">💳</p>
+              <p className="font-bold text-amber-900 text-lg">결제를 진행해주세요</p>
+              <p className="text-xs text-amber-700 mt-1">
+                결제 완료 후 기사가 출발합니다
+              </p>
+            </div>
+            <div className="bg-white rounded-lg p-3 flex justify-between items-center">
+              <span className="text-gray-600">결제 금액</span>
+              <span className="text-amber-600 font-bold text-xl">
+                {request.payment_amount?.toLocaleString()}원
+              </span>
+            </div>
+            <button
+              onClick={handlePayment}
+              disabled={paying}
+              className={`w-full py-4 rounded-xl text-white font-bold text-lg ${
+                paying
+                  ? 'bg-gray-400 cursor-not-allowed'
+                  : 'bg-amber-500 hover:bg-amber-600'
+              }`}
+            >
+              {paying ? '결제 진행 중...' : '💳 결제하기'}
+            </button>
+          </div>
+        )}
+
+        {/* 결제 완료 배지 */}
+        {request.payment_status === 'paid' && request.status === 'dispatched' && (
+          <div className="bg-green-50 border border-green-200 rounded-xl p-4 text-center">
+            <p className="text-green-700 font-bold">✅ 결제가 완료되었습니다</p>
+            {request.paid_at && (
+              <p className="text-xs text-green-600 mt-1">
+                {new Date(request.paid_at).toLocaleString('ko-KR')}
+              </p>
+            )}
           </div>
         )}
 

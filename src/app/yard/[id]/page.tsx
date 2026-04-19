@@ -14,7 +14,11 @@ interface DispatchRequest {
   requested_time: string;
   status: string;
   payment_amount: number;
+  payment_status: string | null;  // pending/awaiting_payment/paid/failed
+  platform_fee: number | null;    // 다시 수수료 (10%) - 집하장엔 숨김, 관리자만 봄
+  yard_payout: number | null;     // 집하장 지급액 (90%) - 집하장엔 "거래 금액"으로 표시
   assigned_driver_id: string | null;
+  yard_id: string | null;         // 이 주문을 처리하는 집하장 (정산 추적용)
   created_at: string;
 }
 
@@ -99,19 +103,50 @@ export default function YardDetailPage({ params }: { params: Promise<{ id: strin
     setShowDriverList(true);
   };
 
-  // 기사 배정 확정
+  // 기사 배정 확정 + 결제 대기 상태로 전환
+  //
+  // 변경점 (Step 4 + Step 6):
+  // 1. payment_status를 'awaiting_payment'로 설정 → 고객에게 결제 요청
+  // 2. 플랫폼 수수료(10%), 집하장 지급액(90%) 자동 계산해서 DB에 저장
+  //    (집하장 화면에는 수수료를 노출하지 않음 - 관리자만 봄)
+  // 3. yard_id 저장 → 정산 시 어느 집하장에 돈 보낼지 추적
+  // 4. 기사 상태 변경(busy)은 결제 완료 후로 미룸
+  //    → 결제 실패/취소 시 기사가 헛되이 busy 상태로 잡히는 것 방지
   const handleAssign = async () => {
     if (!selectedDriver || !request) return;
 
     setAssigning(true);
 
     try {
-      // 배차 요청 상태 업데이트
+      // 💰 플랫폼 수수료 계산 (내부 계산용, 집하장에겐 숨김)
+      const PLATFORM_FEE_RATE = 0.1; // 10%
+      const platformFee = Math.floor(request.payment_amount * PLATFORM_FEE_RATE);
+      const yardPayout = request.payment_amount - platformFee;
+
+      // 🏢 현재 로그인한 집하장 관리자의 소속 집하장 ID 조회
+      // (정산 시 어느 집하장에 돈 보낼지 추적하기 위해 필수!)
+      const { data: { user } } = await supabase.auth.getUser();
+      let yardId: string | null = null;
+
+      if (user) {
+        const { data: managerData } = await supabase
+          .from('users')
+          .select('yard_id')
+          .eq('id', user.id)
+          .single();
+        yardId = managerData?.yard_id || null;
+      }
+
+      // 배차 요청 상태 업데이트 + 결제 대기 상태 + 수수료/지급액 + 집하장 저장
       const { error: updateError } = await supabase
         .from('dispatch_requests')
         .update({
           status: 'dispatched',
           assigned_driver_id: selectedDriver,
+          yard_id: yardId, // ← 이 집하장이 처리하는 주문 (정산 추적용)
+          payment_status: 'awaiting_payment',
+          platform_fee: platformFee,
+          yard_payout: yardPayout,
         })
         .eq('id', request.id);
 
@@ -121,21 +156,14 @@ export default function YardDetailPage({ params }: { params: Promise<{ id: strin
         return;
       }
 
-      // 기사 상태를 busy로 변경
-      await supabase
-        .from('drivers')
-        .update({ status: 'busy' })
-        .eq('id', selectedDriver);
-
-      // 배차 로그 기록
-      const { data: { user } } = await supabase.auth.getUser();
+      // 배차 로그 기록 (user는 위에서 이미 조회함)
       await supabase.from('dispatch_logs').insert({
         request_id: request.id,
         status: 'dispatched',
         changed_by: user?.id,
       });
 
-      alert('기사 배정이 완료되었습니다!');
+      alert('배차 확정 완료!\n고객의 결제를 기다리는 중입니다.');
       router.push('/yard');
     } catch (err) {
       console.error('에러:', err);
@@ -160,6 +188,14 @@ export default function YardDetailPage({ params }: { params: Promise<{ id: strin
       </div>
     );
   }
+
+  // 집하장에 보여줄 금액:
+  // - 배차 확정 전: 예상 거래 금액 = payment_amount의 90% (수수료 떼기 전이니 추정치)
+  // - 배차 확정 후: DB에 저장된 yard_payout 값 사용
+  const displayAmount =
+    request.status === 'requested'
+      ? Math.floor(request.payment_amount * 0.9)
+      : (request.yard_payout ?? Math.floor(request.payment_amount * 0.9));
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -215,14 +251,19 @@ export default function YardDetailPage({ params }: { params: Promise<{ id: strin
             <p className="font-medium">{request.requested_date} {request.requested_time}</p>
           </div>
 
-          {/* 금액 */}
+          {/* 거래 금액 (집하장 입장에서 받을 돈 = 수수료 떼고 남는 금액) */}
           <div className="border-t pt-3">
             <div className="flex justify-between items-center">
-              <p className="text-gray-500">금액</p>
+              <p className="text-gray-500">거래 금액</p>
               <p className="text-amber-600 font-bold text-xl">
-                {request.payment_amount?.toLocaleString()}원
+                {displayAmount.toLocaleString()}원
               </p>
             </div>
+            {request.status === 'requested' && (
+              <p className="text-xs text-gray-400 mt-1 text-right">
+                * 배차 확정 시 확정됩니다
+              </p>
+            )}
           </div>
         </div>
 
@@ -294,12 +335,44 @@ export default function YardDetailPage({ params }: { params: Promise<{ id: strin
 
         {/* 이미 배차된 경우 */}
         {request.status !== 'requested' && (
-          <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 text-center">
-            <p className="text-blue-700 font-medium">
-              {request.status === 'dispatched' && '기사가 배정되었습니다'}
-              {request.status === 'in_progress' && '작업이 진행 중입니다'}
-              {request.status === 'completed' && '작업이 완료되었습니다'}
-            </p>
+          <div className="space-y-3">
+            <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 text-center">
+              <p className="text-blue-700 font-medium">
+                {request.status === 'dispatched' && '기사가 배정되었습니다'}
+                {request.status === 'in_progress' && '작업이 진행 중입니다'}
+                {request.status === 'completed' && '작업이 완료되었습니다'}
+              </p>
+            </div>
+
+            {/* 결제 상태 표시 */}
+            {request.status === 'dispatched' && (
+              <div
+                className={`rounded-xl p-4 text-center border ${
+                  request.payment_status === 'paid'
+                    ? 'bg-green-50 border-green-200'
+                    : request.payment_status === 'awaiting_payment'
+                    ? 'bg-amber-50 border-amber-200'
+                    : request.payment_status === 'failed'
+                    ? 'bg-red-50 border-red-200'
+                    : 'bg-gray-50 border-gray-200'
+                }`}
+              >
+                {request.payment_status === 'paid' && (
+                  <p className="text-green-700 font-bold">✅ 결제 완료</p>
+                )}
+                {request.payment_status === 'awaiting_payment' && (
+                  <>
+                    <p className="text-amber-700 font-bold">⏳ 결제 대기중</p>
+                    <p className="text-xs text-amber-600 mt-1">
+                      고객의 결제를 기다리고 있습니다
+                    </p>
+                  </>
+                )}
+                {request.payment_status === 'failed' && (
+                  <p className="text-red-700 font-bold">❌ 결제 실패</p>
+                )}
+              </div>
+            )}
           </div>
         )}
       </div>
