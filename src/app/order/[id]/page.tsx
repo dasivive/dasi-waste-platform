@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, use } from 'react';
+import { useState, useEffect, use, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { supabase } from '@/lib/supabase';
 
@@ -8,6 +8,8 @@ interface DispatchRequest {
   id: string;
   site_address: string;
   site_detail: string;
+  latitude: number | null;
+  longitude: number | null;
   waste_type: string;
   vehicle_type: string;
   requested_date: string;
@@ -17,6 +19,9 @@ interface DispatchRequest {
   payment_amount: number;
   assigned_driver_id: string | null;
   created_at: string;
+  driver_latitude: number | null;
+  driver_longitude: number | null;
+  driver_location_updated_at: string | null;
 }
 
 interface StatusLog {
@@ -45,6 +50,23 @@ const STATUS_FLOW = [
   { status: 'completed', label: '완료', icon: '✅', desc: '작업이 완료되었습니다' },
 ];
 
+const MAP_VISIBLE_STATUSES = ['departed', 'arrived', 'working'];
+
+declare global {
+  interface Window {
+    kakao: any;
+  }
+}
+
+function PhoneLink({ phone }: { phone: string }) {
+  const href = 'tel:' + phone;
+  return (
+    <a href={href} className="text-blue-500 text-sm mt-1 block">
+      📞 {phone}
+    </a>
+  );
+}
+
 export default function OrderDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const router = useRouter();
@@ -55,9 +77,13 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
   const [currentDetailStatus, setCurrentDetailStatus] = useState('requested');
   const [loading, setLoading] = useState(true);
 
+  const mapContainerRef = useRef<HTMLDivElement>(null);
+  const mapInstanceRef = useRef<any>(null);
+  const driverMarkerRef = useRef<any>(null);
+  const siteMarkerRef = useRef<any>(null);
+
   useEffect(() => {
     const fetchData = async () => {
-      // 배차 요청 정보
       const { data: reqData, error } = await supabase
         .from('dispatch_requests')
         .select('*')
@@ -72,7 +98,6 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
 
       setRequest(reqData);
 
-      // 기사 정보
       if (reqData.assigned_driver_id) {
         const { data: userData } = await supabase
           .from('users')
@@ -86,7 +111,6 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
         }
       }
 
-      // 상태 로그
       const { data: logs } = await supabase
         .from('dispatch_logs')
         .select('status, created_at')
@@ -95,7 +119,6 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
 
       if (logs) {
         setStatusLogs(logs);
-        // 세부 상태 결정
         if (reqData.status === 'completed') {
           setCurrentDetailStatus('completed');
         } else if (logs.length > 0) {
@@ -112,15 +135,160 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
 
     fetchData();
 
-    // 실시간 업데이트 (5초마다 새로고침)
-    const interval = setInterval(fetchData, 5000);
-    return () => clearInterval(interval);
+    // Realtime 구독: dispatch_requests 테이블의 이 주문이 바뀔 때마다 자동 업데이트
+    const channel = supabase
+      .channel('order-' + id)
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'dispatch_requests',
+          filter: 'id=eq.' + id,
+        },
+        () => {
+          fetchData();
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'dispatch_logs',
+          filter: 'request_id=eq.' + id,
+        },
+        () => {
+          fetchData();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, [id]);
 
-  // 현재까지 완료된 상태들
+  useEffect(() => {
+    if (!MAP_VISIBLE_STATUSES.includes(currentDetailStatus)) return;
+    if (!request) return;
+    if (!request.latitude || !request.longitude) return;
+    if (!mapContainerRef.current) return;
+
+    const initMap = () => {
+      if (!window.kakao || !window.kakao.maps) return;
+      if (!mapContainerRef.current || !request) return;
+
+      window.kakao.maps.load(() => {
+        const kakao = window.kakao;
+
+        if (!mapInstanceRef.current) {
+          const options = {
+            center: new kakao.maps.LatLng(request.latitude, request.longitude),
+            level: 4,
+          };
+          mapInstanceRef.current = new kakao.maps.Map(mapContainerRef.current, options);
+
+          const sitePosition = new kakao.maps.LatLng(request.latitude, request.longitude);
+          siteMarkerRef.current = new kakao.maps.Marker({
+            position: sitePosition,
+            map: mapInstanceRef.current,
+          });
+        }
+
+        if (request.driver_latitude && request.driver_longitude) {
+          const driverPosition = new kakao.maps.LatLng(
+            request.driver_latitude,
+            request.driver_longitude
+          );
+
+          const svgString = '<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48"><circle cx="24" cy="24" r="20" fill="#3B82F6" stroke="white" stroke-width="3"/><text x="24" y="31" text-anchor="middle" font-size="22">🚛</text></svg>';
+          const imageSrc = 'data:image/svg+xml;utf8,' + encodeURIComponent(svgString);
+          const imageSize = new kakao.maps.Size(48, 48);
+          const imageOption = { offset: new kakao.maps.Point(24, 24) };
+          const markerImage = new kakao.maps.MarkerImage(imageSrc, imageSize, imageOption);
+
+          if (driverMarkerRef.current) {
+            driverMarkerRef.current.setPosition(driverPosition);
+          } else {
+            driverMarkerRef.current = new kakao.maps.Marker({
+              position: driverPosition,
+              map: mapInstanceRef.current,
+              image: markerImage,
+            });
+          }
+
+          const bounds = new kakao.maps.LatLngBounds();
+          const sitePos = new kakao.maps.LatLng(request.latitude, request.longitude);
+          bounds.extend(sitePos);
+          bounds.extend(driverPosition);
+
+          const distance = getDistanceMeters(
+            request.latitude,
+            request.longitude,
+            request.driver_latitude,
+            request.driver_longitude
+          );
+          if (distance > 50 && mapInstanceRef.current) {
+            mapInstanceRef.current.setBounds(bounds);
+          }
+        }
+      });
+    };
+
+    if (window.kakao && window.kakao.maps) {
+      initMap();
+      return;
+    }
+
+    const existingScript = document.getElementById('kakao-map-sdk');
+    if (existingScript) {
+      existingScript.addEventListener('load', initMap);
+      return;
+    }
+
+    const script = document.createElement('script');
+    script.id = 'kakao-map-sdk';
+    script.async = true;
+    const kakaoKey = process.env.NEXT_PUBLIC_KAKAO_JS_KEY;
+    script.src = 'https://dapi.kakao.com/v2/maps/sdk.js?appkey=' + kakaoKey + '&autoload=false';
+    script.onload = initMap;
+    document.head.appendChild(script);
+  }, [currentDetailStatus, request]);
+
+  const getDistanceMeters = (lat1: number, lng1: number, lat2: number, lng2: number) => {
+    const R = 6371e3;
+    const toRad = (deg: number) => (deg * Math.PI) / 180;
+    const dLat = toRad(lat2 - lat1);
+    const dLng = toRad(lng2 - lng1);
+    const a =
+      Math.sin(dLat / 2) ** 2 +
+      Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return R * c;
+  };
+
+  const getSecondsSinceUpdate = (updatedAt: string | null) => {
+    if (!updatedAt) return null;
+    const updated = new Date(updatedAt).getTime();
+    const now = new Date().getTime();
+    return Math.floor((now - updated) / 1000);
+  };
+
+  const getTimeAgoText = (seconds: number | null) => {
+    if (seconds === null) return '';
+    if (seconds < 60) return seconds + '초 전';
+    if (seconds < 3600) return Math.floor(seconds / 60) + '분 전';
+    return '오래 전';
+  };
+
   const getCompletedStatuses = () => {
     const completed = ['requested'];
-    if (request?.status === 'dispatched' || request?.status === 'in_progress' || request?.status === 'completed') {
+    if (
+      request?.status === 'dispatched' ||
+      request?.status === 'in_progress' ||
+      request?.status === 'completed'
+    ) {
       completed.push('dispatched');
     }
     statusLogs.forEach((log) => {
@@ -136,7 +304,6 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
 
   const completedStatuses = getCompletedStatuses();
 
-  // 시간 포맷
   const formatTime = (dateStr: string) => {
     const date = new Date(dateStr);
     return date.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
@@ -158,9 +325,20 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
     );
   }
 
+  const showMap =
+    MAP_VISIBLE_STATUSES.includes(currentDetailStatus) &&
+    request.latitude &&
+    request.longitude;
+
+  const secondsAgo = getSecondsSinceUpdate(request.driver_location_updated_at);
+  const hasRecentLocation =
+    request.driver_latitude &&
+    request.driver_longitude &&
+    secondsAgo !== null &&
+    secondsAgo < 120;
+
   return (
     <div className="min-h-screen bg-gray-50">
-      {/* 상단 헤더 */}
       <div className="bg-white border-b px-4 py-3 flex items-center">
         <button onClick={() => router.push('/')} className="text-gray-600 mr-3">
           ← 뒤로
@@ -169,7 +347,6 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
       </div>
 
       <div className="p-4 space-y-4">
-        {/* 현재 상태 배너 */}
         {request.status === 'requested' && (
           <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-center">
             <p className="text-2xl mb-2">⏳</p>
@@ -184,11 +361,7 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
             <p className="text-blue-800 font-bold">기사가 배정되었습니다</p>
             <div className="mt-3 bg-white rounded-lg p-3">
               <p className="font-bold text-gray-800">{driverName} 기사님</p>
-              {driverPhone && (
-                <a href={`tel:${driverPhone}`} className="text-blue-500 text-sm mt-1 block">
-                  📞 {driverPhone}
-                </a>
-              )}
+              {driverPhone && <PhoneLink phone={driverPhone} />}
             </div>
           </div>
         )}
@@ -200,11 +373,7 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
             {driverName && (
               <div className="mt-3 bg-white rounded-lg p-3">
                 <p className="font-bold text-gray-800">{driverName} 기사님</p>
-                {driverPhone && (
-                  <a href={`tel:${driverPhone}`} className="text-blue-500 text-sm mt-1 block">
-                    📞 {driverPhone}
-                  </a>
-                )}
+                {driverPhone && <PhoneLink phone={driverPhone} />}
               </div>
             )}
           </div>
@@ -217,15 +386,46 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
           </div>
         )}
 
-        {/* 주문 정보 */}
+        {showMap && (
+          <div className="bg-white rounded-xl border overflow-hidden">
+            <div className="px-4 py-3 border-b flex items-center justify-between">
+              <div className="flex items-center space-x-2">
+                <span className="text-lg">🚛</span>
+                <p className="font-bold text-gray-700">기사 실시간 위치</p>
+              </div>
+              {hasRecentLocation ? (
+                <span className="text-xs text-green-600 font-medium">
+                  🟢 {getTimeAgoText(secondsAgo)}
+                </span>
+              ) : (
+                <span className="text-xs text-gray-400">위치 정보 없음</span>
+              )}
+            </div>
+            <div
+              ref={mapContainerRef}
+              className="w-full bg-gray-100"
+              style={{ height: '300px' }}
+            >
+            </div>
+            <div className="px-4 py-2 bg-gray-50 text-xs text-gray-500 flex items-center space-x-4">
+              <span>📍 현장</span>
+              <span>🚛 기사 위치</span>
+            </div>
+          </div>
+        )}
+
         <div className="bg-white rounded-xl border p-4 space-y-3">
           <div className="flex justify-between">
             <span className="text-gray-500 text-sm">폐기물</span>
-            <span className="font-medium">{wasteLabels[request.waste_type] || request.waste_type}</span>
+            <span className="font-medium">
+              {wasteLabels[request.waste_type] || request.waste_type}
+            </span>
           </div>
           <div className="flex justify-between">
             <span className="text-gray-500 text-sm">차량</span>
-            <span className="font-medium">{vehicleLabels[request.vehicle_type] || request.vehicle_type}</span>
+            <span className="font-medium">
+              {vehicleLabels[request.vehicle_type] || request.vehicle_type}
+            </span>
           </div>
           <div className="flex justify-between items-start">
             <span className="text-gray-500 text-sm">현장</span>
@@ -238,7 +438,9 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
           </div>
           <div className="flex justify-between">
             <span className="text-gray-500 text-sm">일시</span>
-            <span className="font-medium">{request.requested_date} {request.requested_time}</span>
+            <span className="font-medium">
+              {request.requested_date} {request.requested_time}
+            </span>
           </div>
           <div className="flex justify-between border-t pt-3">
             <span className="text-gray-700 font-bold">금액</span>
@@ -248,7 +450,6 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
           </div>
         </div>
 
-        {/* 진행 타임라인 */}
         <div className="bg-white rounded-xl border p-4">
           <h3 className="font-bold text-gray-700 mb-4">진행 상태</h3>
           <div className="space-y-0">
@@ -261,30 +462,28 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
                 <div key={step.status} className="flex items-start">
                   <div className="flex flex-col items-center mr-4">
                     <div
-                      className={`w-9 h-9 rounded-full flex items-center justify-center text-sm ${
-                        isDone
-                          ? 'bg-green-100'
-                          : isCurrent
-                          ? 'bg-amber-100'
-                          : 'bg-gray-100'
-                      }`}
+                      className={
+                        'w-9 h-9 rounded-full flex items-center justify-center text-sm ' +
+                        (isDone ? 'bg-green-100' : isCurrent ? 'bg-amber-100' : 'bg-gray-100')
+                      }
                     >
                       {step.icon}
                     </div>
                     {idx < STATUS_FLOW.length - 1 && (
                       <div
-                        className={`w-0.5 h-6 ${
-                          isDone ? 'bg-green-300' : 'bg-gray-200'
-                        }`}
+                        className={
+                          'w-0.5 h-6 ' + (isDone ? 'bg-green-300' : 'bg-gray-200')
+                        }
                       />
                     )}
                   </div>
                   <div className="pt-1.5">
                     <div className="flex items-center space-x-2">
                       <p
-                        className={`font-medium text-sm ${
-                          isDone ? 'text-green-700' : isCurrent ? 'text-amber-700' : 'text-gray-400'
-                        }`}
+                        className={
+                          'font-medium text-sm ' +
+                          (isDone ? 'text-green-700' : isCurrent ? 'text-amber-700' : 'text-gray-400')
+                        }
                       >
                         {step.label}
                       </p>

@@ -38,6 +38,9 @@ const STATUS_FLOW = [
   { status: 'completed', label: '완료', icon: '✅', desc: '작업이 완료되었습니다' },
 ];
 
+// 위치 전송을 시작할 상태 (출발 이후부터)
+const LOCATION_SHARE_STATUSES = ['departed', 'arrived', 'working'];
+
 export default function DriverDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const router = useRouter();
@@ -46,8 +49,13 @@ export default function DriverDetailPage({ params }: { params: Promise<{ id: str
   const [loading, setLoading] = useState(true);
   const [updating, setUpdating] = useState(false);
   const [statusHistory, setStatusHistory] = useState<string[]>(['dispatched']);
-  const [driverId, setDriverId] = useState<string | null>(null); // 현재 로그인한 기사 ID
-  const [showNavMenu, setShowNavMenu] = useState(false); // 네비 선택 메뉴 표시 여부
+  const [driverId, setDriverId] = useState<string | null>(null);
+  const [showNavMenu, setShowNavMenu] = useState(false);
+
+  // 위치 공유 관련 상태
+  const [locationSharing, setLocationSharing] = useState(false); // 위치 전송 중 여부
+  const [locationError, setLocationError] = useState<string | null>(null); // GPS 에러 메시지
+  const [lastSentAt, setLastSentAt] = useState<Date | null>(null); // 마지막 전송 시각
 
   useEffect(() => {
     const fetchData = async () => {
@@ -114,6 +122,71 @@ export default function DriverDetailPage({ params }: { params: Promise<{ id: str
     fetchData();
   }, [id, router]);
 
+  // ==== 위치 공유 로직 ====
+  // 현재 상태가 "운행 중"일 때만 GPS를 추적하고 DB에 업데이트
+  useEffect(() => {
+    // 운행 중 상태가 아니면 위치 공유 안 함
+    if (!LOCATION_SHARE_STATUSES.includes(currentStatus)) {
+      setLocationSharing(false);
+      return;
+    }
+
+    // 브라우저가 Geolocation을 지원하는지 확인
+    if (!navigator.geolocation) {
+      setLocationError('브라우저가 위치 정보를 지원하지 않습니다');
+      return;
+    }
+
+    setLocationSharing(true);
+    setLocationError(null);
+
+    // watchPosition: 위치가 바뀔 때마다 콜백 실행
+    const watchId = navigator.geolocation.watchPosition(
+      async (position) => {
+        // 성공: 현재 좌표를 DB에 저장
+        const lat = position.coords.latitude;
+        const lng = position.coords.longitude;
+        const now = new Date().toISOString();
+
+        const { error } = await supabase
+          .from('dispatch_requests')
+          .update({
+            driver_latitude: lat,
+            driver_longitude: lng,
+            driver_location_updated_at: now,
+          })
+          .eq('id', id);
+
+        if (error) {
+          console.error('위치 업데이트 실패:', error);
+        } else {
+          setLastSentAt(new Date());
+          setLocationError(null);
+        }
+      },
+      (err) => {
+        // 실패: 에러 메시지 표시
+        let msg = '위치를 가져올 수 없습니다';
+        if (err.code === 1) msg = '위치 정보 권한이 거부되었습니다. 브라우저 설정에서 허용해주세요.';
+        if (err.code === 2) msg = '현재 위치를 파악할 수 없습니다 (GPS 신호 없음)';
+        if (err.code === 3) msg = '위치 요청 시간이 초과되었습니다';
+        setLocationError(msg);
+        console.error('Geolocation error:', err);
+      },
+      {
+        enableHighAccuracy: true, // 정확도 높게
+        maximumAge: 10000,        // 10초 이내 캐시된 위치도 허용
+        timeout: 15000,           // 15초 이상 걸리면 타임아웃
+      }
+    );
+
+    // 컴포넌트 언마운트 or 상태 바뀔 때 GPS 추적 중단
+    return () => {
+      navigator.geolocation.clearWatch(watchId);
+      setLocationSharing(false);
+    };
+  }, [currentStatus, id]);
+
   // 다음 상태로 변경
   const handleNextStatus = async () => {
     if (!driverId) return;
@@ -125,26 +198,33 @@ export default function DriverDetailPage({ params }: { params: Promise<{ id: str
     setUpdating(true);
 
     try {
-      // 완료면 status='completed', 아니면 'in_progress'
       const dbStatus = nextStatus.status === 'completed' ? 'completed' : 'in_progress';
       await supabase
         .from('dispatch_requests')
         .update({ status: dbStatus })
         .eq('id', id);
 
-      // 상태 변경 로그 저장 (실제 로그인한 기사 ID로!)
       await supabase.from('dispatch_logs').insert({
         request_id: id,
         status: nextStatus.status,
         changed_by: driverId,
       });
 
-      // 완료 시 기사 상태 available로 변경 (실제 로그인한 기사 ID로!)
       if (nextStatus.status === 'completed') {
         await supabase
           .from('drivers')
           .update({ status: 'available' })
           .eq('id', driverId);
+
+        // 완료 시 위치 정보 초기화 (더 이상 추적 안 하니까)
+        await supabase
+          .from('dispatch_requests')
+          .update({
+            driver_latitude: null,
+            driver_longitude: null,
+            driver_location_updated_at: null,
+          })
+          .eq('id', id);
       }
 
       setCurrentStatus(nextStatus.status);
@@ -162,19 +242,14 @@ export default function DriverDetailPage({ params }: { params: Promise<{ id: str
     }
   };
 
-  // 카카오맵으로 길안내 열기
   const openKakaoNavi = () => {
     if (!request) return;
-
-    // 좌표가 있으면 좌표 기반 길안내, 없으면 주소 검색
     if (request.latitude && request.longitude) {
-      // 카카오맵 길찾기 (현재 위치 → 목적지)
       const url = `https://map.kakao.com/link/to/${encodeURIComponent(
         request.site_address
       )},${request.latitude},${request.longitude}`;
       window.open(url, '_blank');
     } else {
-      // 좌표가 없으면 주소 검색
       const url = `https://map.kakao.com/link/search/${encodeURIComponent(
         request.site_address
       )}`;
@@ -183,18 +258,13 @@ export default function DriverDetailPage({ params }: { params: Promise<{ id: str
     setShowNavMenu(false);
   };
 
-  // 티맵으로 길안내 열기
   const openTmap = () => {
     if (!request) return;
-
     if (request.latitude && request.longitude) {
-      // 티맵 URL 스킴 (모바일에서 앱 자동 실행)
       const url = `tmap://route?goalname=${encodeURIComponent(
         request.site_address
       )}&goalx=${request.longitude}&goaly=${request.latitude}`;
       window.location.href = url;
-
-      // 앱이 설치 안 되어 있을 경우 대비 (웹 버전)
       setTimeout(() => {
         window.open(
           `https://tmap.life/?goalname=${encodeURIComponent(request.site_address)}`,
@@ -226,6 +296,13 @@ export default function DriverDetailPage({ params }: { params: Promise<{ id: str
       case 'completed': return 'bg-green-500 hover:bg-green-600';
       default: return 'bg-gray-500';
     }
+  };
+
+  const formatTime = (d: Date) => {
+    const h = d.getHours().toString().padStart(2, '0');
+    const m = d.getMinutes().toString().padStart(2, '0');
+    const s = d.getSeconds().toString().padStart(2, '0');
+    return `${h}:${m}:${s}`;
   };
 
   if (loading) {
@@ -276,7 +353,49 @@ export default function DriverDetailPage({ params }: { params: Promise<{ id: str
           </div>
         </div>
 
-        {/* 네비 버튼 (완료 전까지만 표시) */}
+        {/* 위치 공유 상태 표시 */}
+        {LOCATION_SHARE_STATUSES.includes(currentStatus) && (
+          <div
+            className={`rounded-xl border p-4 ${
+              locationError
+                ? 'bg-red-50 border-red-200'
+                : locationSharing
+                ? 'bg-green-50 border-green-200'
+                : 'bg-gray-50 border-gray-200'
+            }`}
+          >
+            <div className="flex items-center space-x-2">
+              <span className="text-xl">
+                {locationError ? '⚠️' : locationSharing ? '🟢' : '⚪'}
+              </span>
+              <p
+                className={`font-medium text-sm ${
+                  locationError
+                    ? 'text-red-700'
+                    : locationSharing
+                    ? 'text-green-700'
+                    : 'text-gray-600'
+                }`}
+              >
+                {locationError
+                  ? '위치 공유 불가'
+                  : locationSharing
+                  ? '위치 공유 중 (고객이 내 위치를 볼 수 있습니다)'
+                  : '위치 공유 준비 중...'}
+              </p>
+            </div>
+            {locationError && (
+              <p className="text-xs text-red-600 mt-2 pl-7">{locationError}</p>
+            )}
+            {lastSentAt && !locationError && (
+              <p className="text-xs text-green-600 mt-1 pl-7">
+                마지막 업데이트: {formatTime(lastSentAt)}
+              </p>
+            )}
+          </div>
+        )}
+
+        {/* 네비 버튼 */}
         {currentStatus !== 'completed' && (
           <div className="space-y-2">
             {!showNavMenu ? (
