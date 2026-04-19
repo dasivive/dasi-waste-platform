@@ -58,12 +58,12 @@ export default function AddressPage() {
   useEffect(() => {
     // 다음 우편번호 스크립트
     const postcodeScript = document.createElement('script');
-    postcodeScript.src = '//t1.daumcdn.net/mapjsapi/bundle/postcode/prod/postcode.v2.js';
+    postcodeScript.src = 'https://t1.daumcdn.net/mapjsapi/bundle/postcode/prod/postcode.v2.js';
     document.head.appendChild(postcodeScript);
 
     // 카카오맵 SDK
     const kakaoScript = document.createElement('script');
-    kakaoScript.src = `//dapi.kakao.com/v2/maps/sdk.js?appkey=${process.env.NEXT_PUBLIC_KAKAO_JS_KEY}&autoload=false&libraries=services`;
+    kakaoScript.src = `https://dapi.kakao.com/v2/maps/sdk.js?appkey=${process.env.NEXT_PUBLIC_KAKAO_JS_KEY}&autoload=false&libraries=services`;
     kakaoScript.onload = () => {
       window.kakao.maps.load(() => {
         setMapReady(true);
@@ -100,7 +100,6 @@ export default function AddressPage() {
   // 주소 검색 열기
   const openPostcode = () => {
     setIsSearchOpen(true);
-    // 다음 우편번호 스크립트 로드 대기
     const waitForPostcode = setInterval(() => {
       if (window.daum && window.daum.Postcode) {
         clearInterval(waitForPostcode);
