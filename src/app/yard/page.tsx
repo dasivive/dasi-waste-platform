@@ -45,9 +45,38 @@ const statusColors: Record<string, string> = {
 
 export default function YardListPage() {
   const router = useRouter();
+  const [user, setUser] = useState<{ id: string; name: string } | null>(null);
   const [requests, setRequests] = useState<DispatchRequest[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<'all' | 'requested' | 'dispatched' | 'in_progress'>('all');
+
+  useEffect(() => {
+    const checkUser = async () => {
+      // 로그인 확인
+      const { data: { user: authUser } } = await supabase.auth.getUser();
+      if (!authUser) {
+        router.push('/login');
+        return;
+      }
+
+      // 역할 확인 — 집하장 관리자가 아니면 접근 차단
+      const { data: userData } = await supabase
+        .from('users')
+        .select('role, name')
+        .eq('id', authUser.id)
+        .single();
+
+      if (!userData || userData.role !== 'yard_manager') {
+        alert('집하장 관리자 계정으로만 접근 가능합니다.');
+        router.push('/');
+        return;
+      }
+
+      setUser({ id: authUser.id, name: userData.name || '관리자' });
+      fetchRequests();
+    };
+    checkUser();
+  }, [router]);
 
   // 배차 요청 목록 불러오기
   const fetchRequests = async () => {
@@ -72,7 +101,9 @@ export default function YardListPage() {
   };
 
   useEffect(() => {
-    fetchRequests();
+    if (user) {
+      fetchRequests();
+    }
   }, [filter]);
 
   // 날짜 포맷
@@ -85,12 +116,29 @@ export default function YardListPage() {
     return `${mm}/${dd}(${day})`;
   };
 
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    router.push('/login');
+  };
+
+  if (!user) return null;
+
   return (
     <div className="min-h-screen bg-gray-50">
       {/* 상단 헤더 */}
       <div className="bg-white border-b px-4 py-3">
-        <h1 className="text-lg font-bold">📋 배차 요청 목록</h1>
-        <p className="text-xs text-gray-400 mt-1">집하장 관리</p>
+        <div className="flex justify-between items-center">
+          <div>
+            <h1 className="text-lg font-bold">📋 배차 요청 목록</h1>
+            <p className="text-xs text-gray-400 mt-1">{user.name}님 · 집하장 관리</p>
+          </div>
+          <button
+            onClick={handleLogout}
+            className="text-gray-400 text-sm hover:text-gray-600"
+          >
+            로그아웃
+          </button>
+        </div>
       </div>
 
       {/* 필터 탭 */}

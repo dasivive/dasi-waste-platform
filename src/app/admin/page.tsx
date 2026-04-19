@@ -29,6 +29,7 @@ const VEHICLE_TYPES = ['2.5ton', 'grab'];
 
 export default function AdminPage() {
   const router = useRouter();
+  const [user, setUser] = useState<{ id: string; name: string } | null>(null);
   const [prices, setPrices] = useState<Price[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -39,6 +40,34 @@ export default function AdminPage() {
   const [newVehicle, setNewVehicle] = useState('2.5ton');
   const [newPrice, setNewPrice] = useState('');
   const [showForm, setShowForm] = useState(false);
+
+  useEffect(() => {
+    const checkUser = async () => {
+      // 로그인 확인
+      const { data: { user: authUser } } = await supabase.auth.getUser();
+      if (!authUser) {
+        router.push('/login');
+        return;
+      }
+
+      // 역할 확인 — 관리자가 아니면 접근 차단
+      const { data: userData } = await supabase
+        .from('users')
+        .select('role, name')
+        .eq('id', authUser.id)
+        .single();
+
+      if (!userData || userData.role !== 'admin') {
+        alert('관리자 계정으로만 접근 가능합니다.');
+        router.push('/');
+        return;
+      }
+
+      setUser({ id: authUser.id, name: userData.name || '관리자' });
+      fetchPrices();
+    };
+    checkUser();
+  }, [router]);
 
   // 가격 목록 불러오기
   const fetchPrices = async () => {
@@ -55,10 +84,6 @@ export default function AdminPage() {
     }
     setLoading(false);
   };
-
-  useEffect(() => {
-    fetchPrices();
-  }, []);
 
   // 가격 추가
   const handleAdd = async () => {
@@ -104,12 +129,29 @@ export default function AdminPage() {
     return amount.toLocaleString('ko-KR') + '원';
   };
 
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    router.push('/login');
+  };
+
+  if (!user) return null;
+
   return (
     <div className="min-h-screen bg-gray-50">
       {/* 상단 헤더 */}
       <div className="bg-gray-800 text-white px-4 py-4">
-        <h1 className="text-lg font-bold">⚙️ 관리자</h1>
-        <p className="text-gray-400 text-xs mt-1">DASI 폐기물 배차 플랫폼</p>
+        <div className="flex justify-between items-center">
+          <div>
+            <h1 className="text-lg font-bold">⚙️ 관리자</h1>
+            <p className="text-gray-400 text-xs mt-1">{user.name}님 · DASI 폐기물 배차 플랫폼</p>
+          </div>
+          <button
+            onClick={handleLogout}
+            className="text-gray-400 text-sm hover:text-white"
+          >
+            로그아웃
+          </button>
+        </div>
       </div>
 
       {/* 탭 메뉴 */}

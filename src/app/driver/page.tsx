@@ -40,23 +40,48 @@ const statusColors: Record<string, string> = {
   completed: 'bg-green-100 text-green-700',
 };
 
-// 테스트용 기사 ID (나중에 로그인 기능 완성 후 제거)
-const TEST_DRIVER_ID = '11111111-1111-1111-1111-111111111111';
-
 export default function DriverPage() {
   const router = useRouter();
+  const [user, setUser] = useState<{ id: string; name: string } | null>(null);
   const [requests, setRequests] = useState<DispatchRequest[]>([]);
   const [loading, setLoading] = useState(true);
 
+  useEffect(() => {
+    const checkUser = async () => {
+      // 로그인 확인
+      const { data: { user: authUser } } = await supabase.auth.getUser();
+      if (!authUser) {
+        router.push('/login');
+        return;
+      }
+
+      // 역할 확인 — 기사가 아니면 접근 차단
+      const { data: userData } = await supabase
+        .from('users')
+        .select('role, name')
+        .eq('id', authUser.id)
+        .single();
+
+      if (!userData || userData.role !== 'driver') {
+        alert('기사 계정으로만 접근 가능합니다.');
+        router.push('/');
+        return;
+      }
+
+      setUser({ id: authUser.id, name: userData.name || '기사' });
+      fetchMyRequests(authUser.id);
+    };
+    checkUser();
+  }, [router]);
+
   // 기사에게 배정된 요청 불러오기
-  const fetchMyRequests = async () => {
+  const fetchMyRequests = async (driverId: string) => {
     setLoading(true);
 
-    // 테스트 모드: 김기사 ID로 조회
     const { data, error } = await supabase
       .from('dispatch_requests')
       .select('*')
-      .eq('assigned_driver_id', TEST_DRIVER_ID)
+      .eq('assigned_driver_id', driverId)
       .in('status', ['dispatched', 'in_progress'])
       .order('created_at', { ascending: false });
 
@@ -68,10 +93,6 @@ export default function DriverPage() {
     setLoading(false);
   };
 
-  useEffect(() => {
-    fetchMyRequests();
-  }, []);
-
   // 날짜 포맷
   const formatDate = (dateStr: string) => {
     const date = new Date(dateStr);
@@ -82,12 +103,29 @@ export default function DriverPage() {
     return `${mm}/${dd}(${day})`;
   };
 
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    router.push('/login');
+  };
+
+  if (!user) return null;
+
   return (
     <div className="min-h-screen bg-gray-50">
       {/* 상단 헤더 */}
       <div className="bg-white border-b px-4 py-3">
-        <h1 className="text-lg font-bold">🚛 내 배차</h1>
-        <p className="text-xs text-gray-400 mt-1">김기사님 (테스트)</p>
+        <div className="flex justify-between items-center">
+          <div>
+            <h1 className="text-lg font-bold">🚛 내 배차</h1>
+            <p className="text-xs text-gray-400 mt-1">{user.name}님</p>
+          </div>
+          <button
+            onClick={handleLogout}
+            className="text-gray-400 text-sm hover:text-gray-600"
+          >
+            로그아웃
+          </button>
+        </div>
       </div>
 
       {/* 배차 리스트 */}
@@ -146,7 +184,7 @@ export default function DriverPage() {
       {/* 새로고침 버튼 */}
       <div className="fixed bottom-6 right-6">
         <button
-          onClick={fetchMyRequests}
+          onClick={() => user && fetchMyRequests(user.id)}
           className="w-14 h-14 bg-amber-500 text-white rounded-full shadow-lg flex items-center justify-center text-xl hover:bg-amber-600"
         >
           🔄

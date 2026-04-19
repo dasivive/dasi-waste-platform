@@ -216,26 +216,23 @@ export default function HomePage() {
         )}
       </div>
 
-      {/* 하단 메뉴 */}
-      <div className="fixed bottom-0 left-0 right-0 bg-white border-t">
+    {/* 하단 메뉴 */}
+    <div className="fixed bottom-0 left-0 right-0 bg-white border-t">
         <div className="flex justify-around py-3">
           <button className="flex flex-col items-center text-amber-500">
             <span className="text-lg">🏠</span>
             <span className="text-xs mt-1 font-medium">홈</span>
           </button>
           <button
-            onClick={() => router.push('/yard')}
+            onClick={() => router.push('/order/waste')}
             className="flex flex-col items-center text-gray-400"
           >
-            <span className="text-lg">📋</span>
-            <span className="text-xs mt-1">집하장</span>
+            <span className="text-lg">📝</span>
+            <span className="text-xs mt-1">주문내역</span>
           </button>
-          <button
-            onClick={() => router.push('/driver')}
-            className="flex flex-col items-center text-gray-400"
-          >
-            <span className="text-lg">🚛</span>
-            <span className="text-xs mt-1">기사</span>
+          <button className="flex flex-col items-center text-gray-400">
+            <span className="text-lg">👤</span>
+            <span className="text-xs mt-1">마이페이지</span>
           </button>
         </div>
       </div>
