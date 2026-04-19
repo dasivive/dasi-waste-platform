@@ -48,6 +48,31 @@ export default function SettlementPage() {
   const [requests, setRequests] = useState<DispatchRequest[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<'all' | 'pending' | 'paid'>('all');
+  const [isAuthorized, setIsAuthorized] = useState(false);
+
+  // 관리자 권한 확인
+  async function checkAdmin() {
+    const { data: { user } } = await supabase.auth.getUser();
+
+    if (!user) {
+      router.push('/login');
+      return false;
+    }
+
+    const { data: userData } = await supabase
+      .from('users')
+      .select('role')
+      .eq('id', user.id)
+      .single();
+
+    if (userData?.role !== 'admin') {
+      alert('관리자만 접근 가능합니다');
+      router.push('/');
+      return false;
+    }
+
+    return true;
+  }
 
   const fetchRequests = async () => {
     setLoading(true);
@@ -92,9 +117,19 @@ export default function SettlementPage() {
     setLoading(false);
   };
 
+  // 최초 진입 시 권한 체크
   useEffect(() => {
-    fetchRequests();
-  }, [filter]);
+    checkAdmin().then((ok) => {
+      if (ok) setIsAuthorized(true);
+    });
+  }, []);
+
+  // 권한 확인된 후, 필터가 바뀔 때마다 목록 조회
+  useEffect(() => {
+    if (isAuthorized) {
+      fetchRequests();
+    }
+  }, [filter, isAuthorized]);
 
   // 정산 처리
   const handleSettle = async (id: string) => {

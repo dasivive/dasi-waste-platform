@@ -41,8 +41,34 @@ export default function YardsManagePage() {
   };
 
   useEffect(() => {
-    fetchYards();
+    checkAdminAndFetch();
   }, []);
+
+  // 관리자 권한 확인 후 데이터 조회
+  async function checkAdminAndFetch() {
+    const { data: { user } } = await supabase.auth.getUser();
+
+    if (!user) {
+      router.push('/login');
+      return;
+    }
+
+    // users 테이블에서 role 확인
+    const { data: userData } = await supabase
+      .from('users')
+      .select('role')
+      .eq('id', user.id)
+      .single();
+
+    if (userData?.role !== 'admin') {
+      alert('관리자만 접근 가능합니다');
+      router.push('/');
+      return;
+    }
+
+    // 관리자 확인 완료 → 집하장 목록 조회
+    fetchYards();
+  }
 
   // 새 집하장 추가
   const handleSave = async () => {
